@@ -1,0 +1,7 @@
+platformdirs>=4.3.6
+colorlog>=6.9.0
+ConfigArgParse>=1.7
+crcmod-plus>=2.1.0
+pyserial>=3.5
+
+cx_Freeze>=7.2.6
