@@ -5,10 +5,12 @@ from collections import deque
 from contextlib import contextmanager
 from enum import IntEnum
 from itertools import islice
+import codecs
 import logging
 import logging.config
 import os
 import re
+import struct
 import sys
 import time
 import tomllib
@@ -286,13 +288,40 @@ class Zmodem:
         else:
             logging.getLogger('rx.header.hex.crc').warning('{:04X}; calc {:04X}'.format(crc16_val, crc16_calc_val))
 
-class ZmodemReceive(Zmodem):
-    def __init__(self, zf, file_writer):
-        super().__init__(zf)
-        self.file_writer = file_writer
-        self.rx_state = self.RxState.WAIT_HEADER_START
+    @staticmethod
+    def swap32(x):
+        return (((x & 0x000000FF) << 24) |
+                ((x & 0x0000FF00) <<  8) |
+                ((x & 0x00FF0000) >>  8) |
+                ((x & 0xFF000000) >> 24))
+
+    def send_hex_header(self, header_type, header_data_flags, header_data_pos):
+        header_data_pos_swap = self.swap32(header_data_pos)
+        header_data = header_data_flags | header_data_pos_swap
+        header_all_data = struct.pack('>BI', header_type, header_data)
+        crc16_calc = CRC_16(header_all_data)
+        crc16_calc_bytes = struct.pack('>H', crc16_calc)
+        header_all_hex = codecs.encode(header_all_data + crc16_calc_bytes, 'hex')
+        header = b'**\x18B' + header_all_hex + b'\r\n\x11'
+        self.l_tx_raw.debug(bytes_as_hex_str(header))
+        self.l_tx_raw.debug(bytes_as_printable_str(header))
+        self.zf.write(header)
+
+    def process_header_type(self, header_type, header_data_flags, header_data_pos):
+        if header_type in self.handlers:
+            handler_fn, pos_mask = self.handlers[header_type]
+            handler_fn(self, header_data_flags, header_data_pos & pos_mask)
+
+    def process_header(self, header_data):
+        header_type_val, header_data_flags = struct.unpack(">BI", header_data)
+        header_data_pos = self.swap32(header_data_flags)
+        header_type = ZType(header_type_val)
+        #logging.getLogger('rx.header.type').info('{!r}'.format(header_type))
+        logging.getLogger('rx.header').info('type {!r}; flags {:08X}; pos {:08X}'.format(header_type, header_data_flags, header_data_pos))
+        self.process_header_type(header_type, header_data_flags, header_data_pos)
 
     def process_input(self):
+        """Process input in self.input_queue."""
         # logging.getLogger('rx.q').debug(bytes_as_hex_str(self.input_queue))
         while self.input_queue:
             byteval = self.input_queue.popleft()
@@ -317,14 +346,80 @@ class ZmodemReceive(Zmodem):
                 try:
                     result = self.get_header_gen.send(byteval)
                     if result is not None:
-                        logging.getLogger('rx.header.type').info('{!r}'.format(ZType(result[0])))
-                        logging.getLogger('rx.header.data').info(bytes_as_hex_str(result[1:]))
+                        self.process_header(result)
+                        self.rx_state = self.RxState.WAIT_HEADER_START
                 except StopIteration:
                     self.rx_state = self.RxState.WAIT_HEADER_START
+
+class ZmodemReceive(Zmodem):
+    def __init__(self, zf, file_writer):
+        super().__init__(zf)
+        self.file_writer = file_writer
+        self.rx_state = self.RxState.WAIT_HEADER_START
 
     def process(self):
         self.read_input()
         self.process_input()
+
+    def zrqinit_handler(self, header_data_flags, header_data_pos):
+        self.send_hex_header(ZType.ZRINIT, 3, 0)
+
+    def zrinit_handler(self, header_data_flags, header_data_pos):
+        pass
+
+    def zsinit_handler(self, header_data_flags, header_data_pos):
+        pass
+
+    def zack_handler(self, header_data_flags, header_data_pos):
+        pass
+
+    def zfile_handler(self, header_data_flags, header_data_pos):
+        pass
+
+    def zskip_handler(self, header_data_flags, header_data_pos):
+        pass
+
+    def znak_handler(self, header_data_flags, header_data_pos):
+        pass
+
+    def zabort_handler(self, header_data_flags, header_data_pos):
+        pass
+
+    def zfin_handler(self, header_data_flags, header_data_pos):
+        pass
+
+    def zrpos_handler(self, header_data_flags, header_data_pos):
+        pass
+
+    def zdata_handler(self, header_data_flags, header_data_pos):
+        pass
+
+    def zeof_handler(self, header_data_flags, header_data_pos):
+        pass
+
+    def zferr_handler(self, header_data_flags, header_data_pos):
+        pass
+
+    def zcrc_handler(self, header_data_flags, header_data_pos):
+        pass
+
+
+    handlers = {
+        ZType.ZRQINIT:     ( zrqinit_handler, 0 ),
+        ZType.ZRINIT:      ( zrinit_handler, 0 ),
+        ZType.ZSINIT:      ( zsinit_handler, 0 ),
+        ZType.ZACK:        ( zack_handler, 0 ),
+        ZType.ZFILE:       ( zfile_handler, 0 ),
+        ZType.ZSKIP:       ( zskip_handler, 0 ),
+        ZType.ZNAK:        ( znak_handler, 0 ),
+        ZType.ZABORT:      ( zabort_handler, 0 ),
+        ZType.ZFIN:        ( zfin_handler, 0 ),
+        ZType.ZRPOS:       ( zrpos_handler, 0 ),
+        ZType.ZDATA:       ( zdata_handler, 0 ),
+        ZType.ZEOF:        ( zeof_handler, 0 ),
+        ZType.ZFERR:       ( zferr_handler, 0 ),
+        ZType.ZCRC:        ( zcrc_handler, 0 ),
+    }
 
 def main():
     # Initialise logging -- part 1
