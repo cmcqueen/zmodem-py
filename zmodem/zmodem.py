@@ -32,6 +32,26 @@ ZBIN = ord(b'A')
 ZHEX = ord(b'B')
 ZBIN32 = ord(b'C')
 
+class ZType(IntEnum):
+    ZRQINIT     = 0
+    ZRINIT      = 1
+    ZSINIT      = 2
+    ZACK        = 3
+    ZFILE       = 4
+    ZSKIP       = 5
+    ZNAK        = 6
+    ZABORT      = 7
+    ZFIN        = 8
+    ZRPOS       = 9
+    ZDATA       = 10
+    ZEOF        = 11
+    ZFERR       = 12
+    ZCRC        = 13
+    ZCHALLENGE  = 14
+    ZCOMPL      = 15
+    ZFREECNT    = 17
+    ZCOMMAND    = 18
+    ZSTDERR     = 19
 
 def bytes_as_hex_str(bytes_data):
     return ' '.join('{:02X}'.format(x) for x in bytes_data)
@@ -175,8 +195,10 @@ class Zmodem:
     #l_rx_raw = logging.getLogger('zmodem.rx.raw')
     #l_tx_raw = logging.getLogger('zmodem.tx.raw')
     class RxState(IntEnum):
-        WAIT_HEADER_START = 0
-        WAIT_FULL_HEADER  = 1
+        WAIT_HEADER_START   = 0
+        WAIT_ZDLE           = 1
+        WAIT_HEADER_TYPE    = 2
+        GET_HEADER      = 3
 
     def __init__(self, zf):
         self.zf = zf
@@ -202,21 +224,10 @@ class Zmodem:
             self.input_queue.extend(d)
 
     @staticmethod
-    def get_header_start(iterable):
-        """Return True if header start is present.
-        Raise StopIteration if insufficient bytes are present."""
-        it = iter(iterable)
-        x = next(it)
-        if x != ZPAD:
-            return False
-        x = next(it)
-        if x != ZDLE:
-            return False
-        x = next(it)
-        return x == ZHEX or x == ZBIN # or x == ZBIN32
-
-    @staticmethod
     def lower_hex_to_int(byte_val):
+        """Convert lower-case hexadecimal character to a nibble value.
+        Input value is the integer value of an ASCII character.
+        Accept only characters 0-9 and a-f."""
         if 0x30 <= byte_val <= 0x39:
             return byte_val - 0x30
         if 0x61 <= byte_val <= 0x66:
@@ -224,39 +235,56 @@ class Zmodem:
         raise ValueError('Invalid value for lowercase hexadecimal')
 
     @staticmethod
-    def get_lower_hex(it, count, size=1):
+    def get_lower_hex(count, word_size=1):
+        """Generator to parse hex digits and yield word values (by default, bytes).
+        Send RX bytes to this generator with send().
+        It will yield integer values one-by-one."""
+        result = None
         for _ in range(count):
             x = 0
-            for _ in range(2 * size):
-                x = x * 16 + Zmodem.lower_hex_to_int(next(it))
-            yield x
+            for _ in range(2 * word_size - 1):
+                byteval = yield result
+                result = None
+                x = x * 16 + Zmodem.lower_hex_to_int(byteval)
+            byteval = yield result
+            result = x * 16 + Zmodem.lower_hex_to_int(byteval)
+        yield result
 
     @staticmethod
-    def get_hex_header(iterable):
-        """Return True if valid hex header is present.
-        Raise StopIteration if insufficient bytes are present."""
-        it = iter(iterable)
-        x = next(it)
-        if x != ZPAD:
-            return False
-        x = next(it)
-        if x != ZDLE:
-            return False
-        x = next(it)
-        if x != ZHEX:
-            return False
+    def get_hex_header():
+        """Generator to parse a ZMODEM hex header.
+        Send RX bytes to this generator with send().
+        It will yield 5 bytes of header contents (1-byte type and 4 bytes of accompanying data)
+        when a complete header with valid CRC has been received."""
         try:
-            header_data = bytes(Zmodem.get_lower_hex(it, 5))
-            crc16_val = next(Zmodem.get_lower_hex(it, 1, 2))
+            # Get 10 hex digits, representing 5 header bytes.
+            g = Zmodem.get_lower_hex(5)
+            next(g)
+            header_data = bytearray()
+            for _ in range(10):
+                byteval = yield
+                result = g.send(byteval)
+                if result is not None:
+                    header_data.append(result)
+            logging.getLogger('rx.header.hex.data').debug(bytes_as_hex_str(header_data))
+
+            # Get 4 hex digits, representing 16-bit CRC value.
+            g = Zmodem.get_lower_hex(1, 2)
+            next(g)
+            # crc16_val = g.send(byteval)  # use last byteval from previously
+            crc16_val = None
+            while crc16_val is None:
+                byteval = yield
+                crc16_val = g.send(byteval)
         except ValueError:
             return False
-        logging.getLogger('rx.header.hex.data').info(bytes_as_hex_str(header_data))
+
+        logging.getLogger('rx.header.hex.crc').debug('{:04X}'.format(crc16_val))
         crc16_calc_val = CRC_16(header_data)
         if crc16_val == crc16_calc_val:
-            return header_data
+            yield header_data
         else:
-            logging.getLogger('rx.header.hex.crc').warning('{!r}; calc {!r}'.format(crc16_val, crc16_calc_val))
-            return False
+            logging.getLogger('rx.header.hex.crc').warning('{:04X}; calc {:04X}'.format(crc16_val, crc16_calc_val))
 
 class ZmodemReceive(Zmodem):
     def __init__(self, zf, file_writer):
@@ -265,28 +293,34 @@ class ZmodemReceive(Zmodem):
         self.rx_state = self.RxState.WAIT_HEADER_START
 
     def process_input(self):
-        logging.getLogger('rx.q').debug(bytes_as_hex_str(self.input_queue))
-        if self.rx_state == self.RxState.WAIT_HEADER_START:
-            # Discard bytes until finding a header start byte.
-            while self.input_queue:
-                try:
-                    result = Zmodem.get_header_start(self.input_queue)
-                except StopIteration:
-                    break
-                else:
-                    if result:
-                        self.rx_state = self.RxState.WAIT_FULL_HEADER
-                        break
-                    else:
-                        self.input_queue.popleft()
-        if self.rx_state == self.RxState.WAIT_FULL_HEADER:
-            try:
-                result = Zmodem.get_hex_header(self.input_queue)
-            except StopIteration:
+        # logging.getLogger('rx.q').debug(bytes_as_hex_str(self.input_queue))
+        while self.input_queue:
+            byteval = self.input_queue.popleft()
+            if byteval == ZPAD:
+                self.rx_state = self.RxState.WAIT_ZDLE
+            elif self.rx_state == self.RxState.WAIT_HEADER_START:
+                # Discard bytes until finding a header start byte.
                 pass
-            else:
-                if result:
-                    logging.getLogger('rx.header.hex').info(bytes_as_hex_str(result))
+            elif self.rx_state == self.RxState.WAIT_ZDLE:
+                if byteval == ZDLE:
+                    self.rx_state = self.RxState.WAIT_HEADER_TYPE
+                else:
+                    self.rx_state = self.RxState.WAIT_HEADER_START
+            elif self.rx_state == self.RxState.WAIT_HEADER_TYPE:
+                if byteval == ZHEX:
+                    self.rx_state = self.RxState.GET_HEADER
+                    self.get_header_gen = self.get_hex_header()
+                    next(self.get_header_gen)
+                else:
+                    self.rx_state = self.RxState.WAIT_HEADER_START
+            elif self.rx_state == self.RxState.GET_HEADER:
+                try:
+                    result = self.get_header_gen.send(byteval)
+                    if result is not None:
+                        logging.getLogger('rx.header.type').info('{!r}'.format(ZType(result[0])))
+                        logging.getLogger('rx.header.data').info(bytes_as_hex_str(result[1:]))
+                except StopIteration:
+                    self.rx_state = self.RxState.WAIT_HEADER_START
 
     def process(self):
         self.read_input()
