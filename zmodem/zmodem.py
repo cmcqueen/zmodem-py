@@ -28,11 +28,18 @@ from .version import __version__
 CRC_16  = crcmod.predefined.mkCrcFun('xmodem')
 CRC_32  = crcmod.predefined.mkCrcFun('crc-32')
 
-ZPAD = ord(b'*')
+CAN  = ord(b'\x18')
 ZDLE = ord(b'\x18')
+ZPAD = ord(b'*')
 ZBIN = ord(b'A')
 ZHEX = ord(b'B')
 ZBIN32 = ord(b'C')
+
+# Subpacket identifiers
+ZCRCE = ord(b'h')   # End of frame. Header packet follows.
+ZCRCG = ord(b'i')   # Frame continues nonstop. ZACK not expected.
+ZCRCQ = ord(b'j')   # Frame continues, ZACK expected.
+ZCRCW = ord(b'k')   # Waiting end of frame, ZACK expected, header packet follows
 
 class ZType(IntEnum):
     ZRQINIT     = 0
@@ -200,11 +207,13 @@ class Zmodem:
         WAIT_HEADER_START   = 0
         WAIT_ZDLE           = 1
         WAIT_HEADER_TYPE    = 2
-        GET_HEADER      = 3
+        GET_HEADER          = 3
+        GET_SUBPACKET       = 4
 
     def __init__(self, zf):
         self.zf = zf
         self.input_queue = deque()
+        self.get_subpacket_gen = None
         self.l_rx_raw = logging.getLogger('zmodem.rx.raw')
         self.l_tx_raw = logging.getLogger('zmodem.tx.raw')
 
@@ -263,7 +272,7 @@ class Zmodem:
             g = Zmodem.get_lower_hex(5)
             next(g)
             header_data = bytearray()
-            for _ in range(10):
+            while len(header_data) < 5:
                 byteval = yield
                 result = g.send(byteval)
                 if result is not None:
@@ -287,6 +296,118 @@ class Zmodem:
             yield header_data
         else:
             logging.getLogger('rx.header.hex.crc').warning('{:04X}; calc {:04X}'.format(crc16_val, crc16_calc_val))
+
+    @staticmethod
+    def get_bin_escaped(count, word_size=1):
+        """Generator to parse binary bytes, possibly escaped, and yield word values (by default, bytes).
+        Send RX bytes to this generator with send().
+        It will yield integer values one-by-one."""
+        result = None
+        for _ in range(count):
+            x = 0
+            for _ in range(word_size - 1):
+                byteval = yield result
+                result = None
+                if byteval == ZDLE:
+                    byteval = yield
+                    if byteval & 0x60 != 0x40:
+                        return byteval
+                    byteval ^= 0x40
+                x = x * 256 + byteval
+            byteval = yield result
+            if byteval == ZDLE:
+                byteval = yield
+                if byteval & 0x60 != 0x40:
+                    return byteval
+                byteval ^= 0x40
+            result = x * 256 + byteval
+        yield result
+
+    @staticmethod
+    def get_bin_header():
+        """Generator to parse a ZMODEM binary header.
+        Send RX bytes to this generator with send().
+        It will yield 5 bytes of header contents (1-byte type and 4 bytes of accompanying data)
+        when a complete header with valid CRC has been received."""
+        try:
+            # Get 5 binary values, possibly escaped.
+            g = Zmodem.get_bin_escaped(5)
+            next(g)
+            header_data = bytearray()
+            while len(header_data) < 5:
+                byteval = yield
+                result = g.send(byteval)
+                if result is not None:
+                    header_data.append(result)
+            logging.getLogger('rx.header.bin.data').debug(bytes_as_hex_str(header_data))
+
+            # Get 2 binary values, possibly escaped.
+            g = Zmodem.get_bin_escaped(1, 2)
+            next(g)
+            # crc16_val = g.send(byteval)  # use last byteval from previously
+            crc16_val = None
+            while crc16_val is None:
+                byteval = yield
+                crc16_val = g.send(byteval)
+        except ValueError:
+            return False
+
+        logging.getLogger('rx.header.bin.crc').debug('{:04X}'.format(crc16_val))
+        crc16_calc_val = CRC_16(header_data)
+        if crc16_val == crc16_calc_val:
+            yield header_data
+        else:
+            logging.getLogger('rx.header.bin.crc').warning('{:04X}; calc {:04X}'.format(crc16_val, crc16_calc_val))
+
+    @staticmethod
+    def get_subpacket():
+        """Generator to parse a ZMODEM subpacket.
+        Send RX bytes to this generator with send().
+        It will yield however many bytes of data after the subpacket terminator followed by
+        a valid CRC has been received."""
+        try:
+            # Get data, possibly escaped.
+            g = Zmodem.get_bin_escaped(2**32)
+            next(g)
+            subpacket_data = bytearray()
+            subpacket_type = b''
+            try:
+                while True:
+                    byteval = yield
+                    result = g.send(byteval)
+                    if result is not None:
+                        subpacket_data.append(result)
+            except StopIteration as e:
+                subpacket_type = bytes((e.value,))
+                if e.value == ZCRCE:
+                    pass
+                elif e.value == ZCRCG:
+                    pass
+                elif e.value == ZCRCQ:
+                    pass
+                elif e.value == ZCRCW:
+                    pass
+                else:
+                    return False
+            logging.getLogger('rx.subpacket.data').debug(bytes_as_hex_str(subpacket_data))
+
+            # Get 2 binary values, possibly escaped.
+            g = Zmodem.get_bin_escaped(1, 2)
+            next(g)
+            # crc16_val = g.send(byteval)  # use last byteval from previously
+            crc16_val = None
+            while crc16_val is None:
+                byteval = yield
+                crc16_val = g.send(byteval)
+        except ValueError:
+            return False
+
+        logging.getLogger('rx.subpacket.crc').debug('{:04X}'.format(crc16_val))
+        crc16_calc_val = CRC_16(subpacket_data + subpacket_type)
+        if crc16_val == crc16_calc_val:
+            yield subpacket_data
+        else:
+            logging.getLogger('rx.subpacket.crc').warning('{:04X}; calc {:04X}'.format(crc16_val, crc16_calc_val))
 
     @staticmethod
     def swap32(x):
@@ -320,6 +441,9 @@ class Zmodem:
         logging.getLogger('rx.header').info('type {!r}; flags {:08X}; pos {:08X}'.format(header_type, header_data_flags, header_data_pos))
         self.process_header_type(header_type, header_data_flags, header_data_pos)
 
+    def process_subpacket(self, subpacket_data):
+        pass
+
     def process_input(self):
         """Process input in self.input_queue."""
         # logging.getLogger('rx.q').debug(bytes_as_hex_str(self.input_queue))
@@ -340,16 +464,33 @@ class Zmodem:
                     self.rx_state = self.RxState.GET_HEADER
                     self.get_header_gen = self.get_hex_header()
                     next(self.get_header_gen)
+                elif byteval == ZBIN:
+                    self.rx_state = self.RxState.GET_HEADER
+                    self.get_header_gen = self.get_bin_header()
+                    next(self.get_header_gen)
                 else:
                     self.rx_state = self.RxState.WAIT_HEADER_START
             elif self.rx_state == self.RxState.GET_HEADER:
                 try:
                     result = self.get_header_gen.send(byteval)
                     if result is not None:
-                        self.process_header(result)
                         self.rx_state = self.RxState.WAIT_HEADER_START
+                        self.process_header(result)
                 except StopIteration:
                     self.rx_state = self.RxState.WAIT_HEADER_START
+            elif self.rx_state == self.RxState.GET_SUBPACKET:
+                if self.get_subpacket_gen is None:
+                    self.get_subpacket_gen = self.get_subpacket()
+                    next(self.get_subpacket_gen)
+                try:
+                    result = self.get_subpacket_gen.send(byteval)
+                    if result is not None:
+                        self.rx_state = self.RxState.WAIT_HEADER_START
+                        self.get_subpacket_gen = None
+                        self.process_subpacket(result)
+                except StopIteration:
+                    self.rx_state = self.RxState.WAIT_HEADER_START
+                    self.get_subpacket_gen = None
 
 class ZmodemReceive(Zmodem):
     def __init__(self, zf, file_writer):
@@ -368,13 +509,13 @@ class ZmodemReceive(Zmodem):
         pass
 
     def zsinit_handler(self, header_data_flags, header_data_pos):
-        pass
+        self.rx_state = self.RxState.GET_SUBPACKET
 
     def zack_handler(self, header_data_flags, header_data_pos):
         pass
 
     def zfile_handler(self, header_data_flags, header_data_pos):
-        pass
+        self.rx_state = self.RxState.GET_SUBPACKET
 
     def zskip_handler(self, header_data_flags, header_data_pos):
         pass
@@ -392,7 +533,7 @@ class ZmodemReceive(Zmodem):
         pass
 
     def zdata_handler(self, header_data_flags, header_data_pos):
-        pass
+        self.rx_state = self.RxState.GET_SUBPACKET
 
     def zeof_handler(self, header_data_flags, header_data_pos):
         pass
