@@ -544,14 +544,8 @@ class ZmodemReceive(Zmodem):
     def zrqinit_handler(self, header_data_flags, header_data_pos):
         self.send_hex_header(ZType.ZRINIT, 1, 256)
 
-    def zrinit_handler(self, header_data_flags, header_data_pos):
-        pass
-
     def zsinit_handler(self, header_data_flags, header_data_pos):
         self.rx_state = self.RxState.GET_SUBPACKET
-
-    def zack_handler(self, header_data_flags, header_data_pos):
-        pass
 
     def zfile_handler(self, header_data_flags, header_data_pos):
         self.file_pos = 0
@@ -569,20 +563,28 @@ class ZmodemReceive(Zmodem):
     def zfin_handler(self, header_data_flags, header_data_pos):
         self.send_hex_header(ZType.ZFIN, 0, 0)
 
-    def zrpos_handler(self, header_data_flags, header_data_pos):
-        pass
-
     def zdata_handler(self, header_data_flags, header_data_pos):
+        self.file_pos = header_data_pos
         self.rx_state = self.RxState.GET_SUBPACKET
 
     def zeof_handler(self, header_data_flags, header_data_pos):
         self.send_hex_header(ZType.ZRINIT, 1, 256)
 
     def zferr_handler(self, header_data_flags, header_data_pos):
+        # Unlikely for sender to send this. Treat it like an abort.
         pass
 
     def zcrc_handler(self, header_data_flags, header_data_pos):
         pass
+
+    def zfreecnt_handler(self, header_data_flags, header_data_pos):
+        # Alternatively: Return actual filesystem free space.
+        self.send_hex_header(ZType.ZACK, 0, 0)
+
+    def zcommand_handler(self, header_data_flags, header_data_pos):
+        # ZCOMMAND is insecure. We should not implement it. Unless we implement "safe" commands.
+        self.send_hex_header(ZType.ZCOMPL, 0, 1)
+
 
     def zsinit_subpacket_pre_handler(self, subpacket_type, subpacket_data):
         pass
@@ -598,6 +600,7 @@ class ZmodemReceive(Zmodem):
         pass
 
     def zfile_subpacket_post_handler(self, subpacket_type, subpacket_data):
+        # Alternatively, send ZSKIP or ZFERR if the filename is bad or transfer options are unsuitable.
         self.send_hex_header(ZType.ZRPOS, 0, 0)
 
     def zdata_subpacket_post_handler(self, subpacket_type, subpacket_data):
@@ -605,19 +608,18 @@ class ZmodemReceive(Zmodem):
 
     header_handlers = {
         ZType.ZRQINIT:     ( zrqinit_handler, 0 ),
-        ZType.ZRINIT:      ( zrinit_handler, 0 ),
         ZType.ZSINIT:      ( zsinit_handler, 0 ),
-        ZType.ZACK:        ( zack_handler, 0 ),
         ZType.ZFILE:       ( zfile_handler, 0 ),
         ZType.ZSKIP:       ( zskip_handler, 0 ),
         ZType.ZNAK:        ( znak_handler, 0 ),
         ZType.ZABORT:      ( zabort_handler, 0 ),
         ZType.ZFIN:        ( zfin_handler, 0 ),
-        ZType.ZRPOS:       ( zrpos_handler, 0 ),
-        ZType.ZDATA:       ( zdata_handler, 0 ),
-        ZType.ZEOF:        ( zeof_handler, 0 ),
+        ZType.ZDATA:       ( zdata_handler, 0xFFFFFFFF ),
+        ZType.ZEOF:        ( zeof_handler, 0xFFFFFFFF ),
         ZType.ZFERR:       ( zferr_handler, 0 ),
-        ZType.ZCRC:        ( zcrc_handler, 0 ),
+        ZType.ZCRC:        ( zcrc_handler, 0xFFFFFFFF ),
+        ZType.ZFREECNT:    ( zfreecnt_handler, 0 ),
+        ZType.ZCOMMAND:    ( zcommand_handler, 0 ),
     }
 
     subpacket_handlers_pre = {
