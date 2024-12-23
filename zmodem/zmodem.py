@@ -420,7 +420,10 @@ class Zmodem:
         crc16_calc = CRC_16(header_all_data)
         crc16_calc_bytes = struct.pack('>H', crc16_calc)
         header_all_hex = codecs.encode(header_all_data + crc16_calc_bytes, 'hex')
-        header = b'**\x18B' + header_all_hex + b'\r\n\x11'  # TODO: Don't send XON for ZACK, ZFIN.
+        header = b'**\x18B' + header_all_hex + b'\r\n'
+        # Send XON, except for ZACK, ZFIN.
+        if header_type != ZType.ZACK and header_type != ZType.ZFIN:
+            header += b'\x11'
         self.l_tx_raw.debug(bytes_as_hex_str(header))
         self.l_tx_raw.debug(bytes_as_printable_str(header))
         self.zf.write(header)
