@@ -634,14 +634,14 @@ def main():
         logging.getLogger('info').info('Press Ctrl-C to stop')
 
         # Open serial
-        with serial.Serial(args.serialport, args.bitrate, timeout=0.25) as s:
+        with serial.Serial(args.serialport, args.bitrate, timeout=0) as s:
 
             rz = ZmodemReceive(s, None)
             logging.getLogger('info').info('Get data')
             # Get input data
             while True:
                 rz.process()
-                time.sleep(0.005)
+                #time.sleep(0.005)
     except KeyboardInterrupt:
         logging.getLogger('zmodem').info('Stopping')
         raise
