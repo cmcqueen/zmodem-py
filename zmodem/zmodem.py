@@ -300,6 +300,17 @@ class Zmodem:
             logging.getLogger('rx.header.hex.crc').warning('{:04X}; calc {:04X}'.format(crc16_val, crc16_calc_val))
 
     @staticmethod
+    def escape_decode(escapeval):
+        if escapeval & 0x60 == 0x40:
+            return escapeval ^ 0x40
+        elif escapeval == 0x6C:
+            return 0x7F
+        elif escapeval == 0x6D:
+            return 0xFF
+        else:
+            raise ValueError
+
+    @staticmethod
     def get_bin_escaped(count, word_size=1):
         """Generator to parse binary bytes, possibly escaped, and yield word values (by default, bytes).
         Send RX bytes to this generator with send().
@@ -311,19 +322,19 @@ class Zmodem:
                 byteval = yield result
                 result = None
                 if byteval == ZDLE:
-                    byteval = yield
-                    logging.getLogger('rx.bin_escaped').debug('ZDLE escape {:02X}'.format(byteval))
-                    if byteval & 0x60 != 0x40 and byteval != 0x3F and byteval != 0xBF:
-                        return byteval
-                    byteval ^= 0x40
+                    escapeval = yield
+                    try:
+                        byteval = Zmodem.escape_decode(escapeval)
+                    except ValueError:
+                        return escapeval
                 x = x * 256 + byteval
             byteval = yield result
             if byteval == ZDLE:
-                byteval = yield
-                logging.getLogger('rx.bin_escaped').debug('ZDLE escape {:02X}'.format(byteval))
-                if byteval & 0x60 != 0x40 and byteval != 0x3F and byteval != 0xBF:
-                    return byteval
-                byteval ^= 0x40
+                escapeval = yield
+                try:
+                    byteval = Zmodem.escape_decode(escapeval)
+                except ValueError:
+                    return escapeval
             result = x * 256 + byteval
         yield result
 
