@@ -35,6 +35,8 @@ ZBIN = ord(b'A')
 ZHEX = ord(b'B')
 ZBIN32 = ord(b'C')
 
+HEADER_TYPES = set(( ZBIN, ZHEX, ZBIN32 ))
+
 RX_BUFFER_SIZE = 256
 ZRINIT_INTERVAL_S = 2
 FINAL_OO_TIMEOUT_S = 3
@@ -208,18 +210,23 @@ class FileWriter:
 class Zmodem:
     #l_rx_raw = logging.getLogger('zmodem.rx.raw')
     #l_tx_raw = logging.getLogger('zmodem.tx.raw')
-    class RxState(IntEnum):
+    class HeaderDetectState(IntEnum):
         WAIT_HEADER_START   = 0
         WAIT_ZDLE           = 1
         WAIT_HEADER_TYPE    = 2
-        GET_HEADER          = 3
-        GET_SUBPACKET       = 4
-        WAIT_FINAL_O        = 5
-        WAIT_FINAL_OO       = 6
+
+    class RxState(IntEnum):
+        WAIT_HEADER         = 0
+        GET_HEADER          = 1
+        GET_SUBPACKET       = 2
+        WAIT_FINAL_O        = 3
+        WAIT_FINAL_OO       = 4
 
     def __init__(self, zf):
         self.zf = zf
         self.input_queue = deque()
+        self.header_detect_state = self.HeaderDetectState.WAIT_HEADER_START
+        self.rx_state = self.RxState.WAIT_HEADER
         self.get_subpacket_gen = None
         self.l_rx_raw = logging.getLogger('zmodem.rx.raw')
         self.l_tx_raw = logging.getLogger('zmodem.tx.raw')
@@ -470,7 +477,7 @@ class Zmodem:
             handler_fn(self, subpacket_type, subpacket_data)
 
         if subpacket_type_enum == ZSubpacketType.ZCRCE:
-            self.rx_state = self.RxState.WAIT_HEADER_START
+            self.rx_state = self.RxState.WAIT_HEADER
         elif subpacket_type_enum == ZSubpacketType.ZCRCG:
             self.rx_state = self.RxState.GET_SUBPACKET
         elif subpacket_type_enum == ZSubpacketType.ZCRCQ:
@@ -478,12 +485,27 @@ class Zmodem:
             self.rx_state = self.RxState.GET_SUBPACKET
         elif subpacket_type_enum == ZSubpacketType.ZCRCW:
             self.send_hex_header(ZType.ZACK, 0, self.file_pos)
-            self.rx_state = self.RxState.WAIT_HEADER_START
+            self.rx_state = self.RxState.WAIT_HEADER
 
         if self.header_type in self.subpacket_handlers_post:
             handler_fn = self.subpacket_handlers_post[self.header_type]
             logging.getLogger('rx.subpacket.process').debug('call {!r}'.format(handler_fn))
             handler_fn(self, subpacket_type, subpacket_data)
+
+    def detect_header(self, byteval):
+        """Detect the start of a header"""
+        if byteval == ZPAD:
+            self.header_detect_state = self.HeaderDetectState.WAIT_ZDLE
+        elif self.header_detect_state == self.HeaderDetectState.WAIT_ZDLE:
+            if byteval == ZDLE:
+                self.header_detect_state = self.HeaderDetectState.WAIT_HEADER_TYPE
+            else:
+                self.header_detect_state = self.HeaderDetectState.WAIT_HEADER_START
+        elif self.header_detect_state == self.HeaderDetectState.WAIT_HEADER_TYPE:
+            self.header_detect_state = self.HeaderDetectState.WAIT_HEADER_START
+            if byteval in HEADER_TYPES:
+                return byteval
+        return None
 
     def process_input(self):
         """Process input in self.input_queue."""
@@ -497,18 +519,8 @@ class Zmodem:
             else:
                 self.cancel_count = 0
 
-            if self.rx_state == self.RxState.WAIT_HEADER_START:
-                # Discard bytes until finding a header start byte.
-                if byteval == ZPAD:
-                    self.rx_state = self.RxState.WAIT_ZDLE
-            elif self.rx_state == self.RxState.WAIT_ZDLE:
-                if byteval == ZPAD:
-                    pass
-                elif byteval == ZDLE:
-                    self.rx_state = self.RxState.WAIT_HEADER_TYPE
-                else:
-                    self.rx_state = self.RxState.WAIT_HEADER_START
-            elif self.rx_state == self.RxState.WAIT_HEADER_TYPE:
+            result = self.detect_header(byteval)
+            if result is not None:
                 if byteval == ZHEX:
                     self.rx_state = self.RxState.GET_HEADER
                     self.get_header_gen = self.get_hex_header()
@@ -518,15 +530,15 @@ class Zmodem:
                     self.get_header_gen = self.get_bin_header()
                     next(self.get_header_gen)
                 else:
-                    self.rx_state = self.RxState.WAIT_HEADER_START
+                    self.rx_state = self.RxState.WAIT_HEADER
             elif self.rx_state == self.RxState.GET_HEADER:
                 try:
                     result = self.get_header_gen.send(byteval)
                     if result is not None:
-                        self.rx_state = self.RxState.WAIT_HEADER_START
+                        self.rx_state = self.RxState.WAIT_HEADER
                         self.process_header(result)
                 except StopIteration:
-                    self.rx_state = self.RxState.WAIT_HEADER_START
+                    self.rx_state = self.RxState.WAIT_HEADER
             elif self.rx_state == self.RxState.GET_SUBPACKET:
                 if self.get_subpacket_gen is None:
                     self.get_subpacket_gen = self.get_subpacket()
@@ -535,14 +547,14 @@ class Zmodem:
                     result = self.get_subpacket_gen.send(byteval)
                     if result is not None:
                         logging.getLogger('rx.subpacket').debug('Got result')
-                        self.rx_state = self.RxState.WAIT_HEADER_START
+                        self.rx_state = self.RxState.WAIT_HEADER
                         self.get_subpacket_gen = None
                         subpacket_type, subpacket_data = result
                         self.process_subpacket(subpacket_type, subpacket_data)
                         logging.getLogger('rx.subpacket').debug('Next state {!r}'.format(self.rx_state))
                 except StopIteration:
                     logging.getLogger('rx.subpacket').debug('stop')
-                    self.rx_state = self.RxState.WAIT_HEADER_START
+                    self.rx_state = self.RxState.WAIT_HEADER
                     self.get_subpacket_gen = None
             elif self.rx_state == self.RxState.WAIT_FINAL_O:
                 if byteval == ord(b'O'):
@@ -558,7 +570,6 @@ class ZmodemReceive(Zmodem):
     def __init__(self, zf, file_writer):
         super().__init__(zf)
         self.file_writer = file_writer
-        self.rx_state = self.RxState.WAIT_HEADER_START
         self.do_periodic_zrinit = True
         self.event_time = 0
 
