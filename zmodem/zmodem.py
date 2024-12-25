@@ -36,6 +36,8 @@ ZHEX = ord(b'B')
 ZBIN32 = ord(b'C')
 
 RX_BUFFER_SIZE = 256
+ZRINIT_INTERVAL_S = 2
+FINAL_OO_TIMEOUT_S = 3
 
 # Subpacket identifiers
 class ZSubpacketType(IntEnum):
@@ -212,6 +214,8 @@ class Zmodem:
         WAIT_HEADER_TYPE    = 2
         GET_HEADER          = 3
         GET_SUBPACKET       = 4
+        WAIT_FINAL_O        = 5
+        WAIT_FINAL_OO       = 6
 
     def __init__(self, zf):
         self.zf = zf
@@ -532,14 +536,33 @@ class Zmodem:
                     logging.getLogger('rx.subpacket').debug('stop')
                     self.rx_state = self.RxState.WAIT_HEADER_START
                     self.get_subpacket_gen = None
+            elif self.rx_state == self.RxState.WAIT_FINAL_O:
+                if byteval == ord(b'O'):
+                    self.rx_state = self.RxState.WAIT_FINAL_OO
+                elif time.monotonic() - self.event_time >= FINAL_OO_TIMEOUT_S:
+                    sys.exit(0)
+            elif self.rx_state == self.RxState.WAIT_FINAL_OO:
+                if byteval == ord(b'O') or time.monotonic() - self.event_time >= FINAL_OO_TIMEOUT_S:
+                    sys.exit(0)
+
 
 class ZmodemReceive(Zmodem):
     def __init__(self, zf, file_writer):
         super().__init__(zf)
         self.file_writer = file_writer
         self.rx_state = self.RxState.WAIT_HEADER_START
+        self.do_periodic_zrinit = True
+        self.event_time = 0
+
+    def periodic_send_zrinit(self):
+        if self.do_periodic_zrinit:
+            now_time = time.monotonic()
+            if now_time - self.event_time >= ZRINIT_INTERVAL_S:
+                self.send_hex_header(ZType.ZRINIT, 0, RX_BUFFER_SIZE)
+                self.event_time = now_time
 
     def process(self):
+        self.periodic_send_zrinit()
         self.read_input()
         self.process_input()
 
@@ -552,6 +575,7 @@ class ZmodemReceive(Zmodem):
     def zfile_handler(self, header_data_flags, header_data_pos):
         self.file_pos = 0
         self.rx_state = self.RxState.GET_SUBPACKET
+        self.do_periodic_zrinit = False
 
     def zskip_handler(self, header_data_flags, header_data_pos):
         pass
@@ -564,6 +588,8 @@ class ZmodemReceive(Zmodem):
 
     def zfin_handler(self, header_data_flags, header_data_pos):
         self.send_hex_header(ZType.ZFIN, 0, 0)
+        self.rx_state = self.RxState.WAIT_FINAL_O
+        self.event_time = time.monotonic()
 
     def zdata_handler(self, header_data_flags, header_data_pos):
         self.file_pos = header_data_pos
