@@ -224,6 +224,7 @@ class Zmodem:
         self.l_rx_raw = logging.getLogger('zmodem.rx.raw')
         self.l_tx_raw = logging.getLogger('zmodem.tx.raw')
         self.file_pos = 0
+        self.cancel_count = 0
 
     def close(self):
         if self.zf:
@@ -489,6 +490,13 @@ class Zmodem:
         # logging.getLogger('rx.q').debug(bytes_as_hex_str(self.input_queue))
         while self.input_queue:
             byteval = self.input_queue.popleft()
+            if byteval == CAN:
+                self.cancel_count += 1
+                if self.cancel_count >= 5:
+                    sys.exit(2)
+            else:
+                self.cancel_count = 0
+
             if self.rx_state == self.RxState.WAIT_HEADER_START:
                 # Discard bytes until finding a header start byte.
                 if byteval == ZPAD:
