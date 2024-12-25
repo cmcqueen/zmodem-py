@@ -35,6 +35,8 @@ ZBIN = ord(b'A')
 ZHEX = ord(b'B')
 ZBIN32 = ord(b'C')
 
+RX_BUFFER_SIZE = 256
+
 # Subpacket identifiers
 class ZSubpacketType(IntEnum):
     ZCRCE = ord(b'h')   # End of frame. Header packet follows.
@@ -542,7 +544,7 @@ class ZmodemReceive(Zmodem):
         self.process_input()
 
     def zrqinit_handler(self, header_data_flags, header_data_pos):
-        self.send_hex_header(ZType.ZRINIT, 1, 256)
+        self.send_hex_header(ZType.ZRINIT, 0, RX_BUFFER_SIZE)
 
     def zsinit_handler(self, header_data_flags, header_data_pos):
         self.rx_state = self.RxState.GET_SUBPACKET
@@ -568,7 +570,7 @@ class ZmodemReceive(Zmodem):
         self.rx_state = self.RxState.GET_SUBPACKET
 
     def zeof_handler(self, header_data_flags, header_data_pos):
-        self.send_hex_header(ZType.ZRINIT, 1, 256)
+        self.send_hex_header(ZType.ZRINIT, 0, RX_BUFFER_SIZE)
 
     def zferr_handler(self, header_data_flags, header_data_pos):
         # Unlikely for sender to send this. Treat it like an abort.
