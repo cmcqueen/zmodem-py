@@ -426,13 +426,15 @@ class Zmodem:
             logging.getLogger('rx.subpacket.data').debug(bytes_as_hex_str(subpacket_data))
 
             # Get 2 binary values, possibly escaped.
-            g = Zmodem.get_bin_escaped(1, 2)
-            next(g)
-            # crc16_val = g.send(byteval)  # use last byteval from previously
-            crc16_val = None
-            while crc16_val is None:
-                byteval = yield
-                crc16_val = g.send(byteval)
+            try:
+                g = Zmodem.get_bin_escaped(1, 2)
+                next(g)
+                crc16_val = None
+                while crc16_val is None:
+                    byteval = yield
+                    crc16_val = g.send(byteval)
+            except StopIteration as e:
+                raise ValueError(e.value)
         except ValueError:
             return False
 
