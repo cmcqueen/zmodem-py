@@ -201,18 +201,24 @@ class FileWriter:
     def __init__(self):
         self.f = None
 
-    def open(self, filename):
+    def open(self, filename, flags=None):
+        self.close()
+        self.f = open(filename, 'wb')
+        return self.f
+
+    def close(self):
         if self.f:
             try:
                 self.f.close()
             except Exception:
                 pass
             self.f = None
-        self.f = open(filename, 'wb')
-        return self.f
 
     def write(self, data):
-        return self.f.write()
+        if self.f:
+            return self.f.write(data)
+        else:
+            return None
 
 class Zmodem:
     #l_rx_raw = logging.getLogger('zmodem.rx.raw')
@@ -626,6 +632,7 @@ class ZmodemReceive(Zmodem):
         self.rx_state = self.RxState.GET_SUBPACKET
 
     def zeof_handler(self, header_data_flags, header_data_pos):
+        self.file_writer.close()
         self.send_hex_header(ZType.ZRINIT, 0, RX_BUFFER_SIZE)
 
     def zferr_handler(self, header_data_flags, header_data_pos):
@@ -651,7 +658,7 @@ class ZmodemReceive(Zmodem):
         pass
 
     def zdata_subpacket_pre_handler(self, subpacket_type, subpacket_data):
-        # TODO: Save data
+        self.file_writer.write(subpacket_data)
         self.file_pos += len(subpacket_data)
 
     def zsinit_subpacket_post_handler(self, subpacket_type, subpacket_data):
@@ -659,6 +666,7 @@ class ZmodemReceive(Zmodem):
 
     def zfile_subpacket_post_handler(self, subpacket_type, subpacket_data):
         # Alternatively, send ZSKIP or ZFERR if the filename is bad or transfer options are unsuitable.
+        self.file_writer.open('test.bin')
         self.send_hex_header(ZType.ZRPOS, 0, 0)
 
     def zdata_subpacket_post_handler(self, subpacket_type, subpacket_data):
@@ -707,7 +715,7 @@ def main():
         # Open serial
         with serial.Serial(args.serialport, args.bitrate, timeout=0) as s:
 
-            rz = ZmodemReceive(s, None)
+            rz = ZmodemReceive(s, FileWriter())
             logging.getLogger('info').info('Get data')
             # Get input data
             while True:
