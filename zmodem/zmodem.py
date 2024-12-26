@@ -41,6 +41,13 @@ RX_BUFFER_SIZE = 256
 ZRINIT_INTERVAL_S = 2
 FINAL_OO_TIMEOUT_S = 3
 
+# Exit code
+class ExitCode(IntEnum):
+    NORMAL          = 0
+    SERIAL_PORT     = 1
+    SERVER_ABORT    = 2
+
+
 # Subpacket identifiers
 class ZSubpacketType(IntEnum):
     ZCRCE = ord(b'h')   # End of frame. Header packet follows.
@@ -136,7 +143,7 @@ def list_serial_ports(*args, **kwargs):
     print("Serial Ports\n")
     for port in get_com_ports():
         print("  {}".format(port))
-    sys.exit(1)
+    sys.exit(ExitCode.SERIAL_PORT)
 
 def get_arguments():
     '''Get command line arguments, and config file(s)
@@ -232,6 +239,7 @@ class Zmodem:
         self.l_tx_raw = logging.getLogger('zmodem.tx.raw')
         self.file_pos = 0
         self.cancel_count = 0
+        self.exit_code = ExitCode.NORMAL
 
     def close(self):
         if self.zf:
@@ -515,7 +523,7 @@ class Zmodem:
             if byteval == CAN:
                 self.cancel_count += 1
                 if self.cancel_count >= 5:
-                    sys.exit(2)
+                    sys.exit(ExitCode.SERVER_ABORT)
             else:
                 self.cancel_count = 0
 
@@ -560,10 +568,10 @@ class Zmodem:
                 if byteval == ord(b'O'):
                     self.rx_state = self.RxState.WAIT_FINAL_OO
                 elif time.monotonic() - self.event_time >= FINAL_OO_TIMEOUT_S:
-                    sys.exit(0)
+                    sys.exit(self.exit_code)
             elif self.rx_state == self.RxState.WAIT_FINAL_OO:
                 if byteval == ord(b'O') or time.monotonic() - self.event_time >= FINAL_OO_TIMEOUT_S:
-                    sys.exit(0)
+                    sys.exit(self.exit_code)
 
 
 class ZmodemReceive(Zmodem):
@@ -603,7 +611,10 @@ class ZmodemReceive(Zmodem):
         pass
 
     def zabort_handler(self, header_data_flags, header_data_pos):
-        pass
+        self.send_hex_header(ZType.ZFIN, 0, 0)
+        self.rx_state = self.RxState.WAIT_FINAL_O
+        self.event_time = time.monotonic()
+        self.exit_code = ExitCode.SERVER_ABORT
 
     def zfin_handler(self, header_data_flags, header_data_pos):
         self.send_hex_header(ZType.ZFIN, 0, 0)
