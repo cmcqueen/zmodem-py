@@ -76,6 +76,19 @@ class ZType(IntEnum):
     ZCOMMAND    = 18
     ZSTDERR     = 19
 
+class ZrinitFlags(IntEnum):
+    CANFDX  = 0x01
+    CANOVIO = 0x02
+    CANBRK  = 0x04
+    CANRLE  = 0x08
+    CANLZW  = 0x10
+    CANFC32 = 0x20
+    ESCCTL  = 0x40
+    ESC8    = 0x80
+
+class ZsinitFlags(IntEnum):
+    ESCCTL  = 0x40
+
 def bytes_as_hex_str(bytes_data):
     return ' '.join('{:02X}'.format(x) for x in bytes_data)
 
@@ -96,8 +109,7 @@ def bytes_as_printable_str(bytes_data):
 
 def logging_init1():
     ch = logging.StreamHandler(sys.stdout)
-    #ch.setLevel(logging.INFO)
-    ch.setLevel(logging.DEBUG)
+    ch.setLevel(logging.INFO)
     # create formatter and add it to the handlers
     formatter = logging.Formatter('%(asctime)s.%(msecs)03d - %(name)s - %(levelname)s - %(message)s',
                                     datefmt='%Y-%m-%d %H:%M:%S')
@@ -180,6 +192,10 @@ def get_arguments():
     parser.add_argument('-b', '--bitrate', metavar='BPS', type=int, default=115200,
                         help='Serial port bit rate')
 
+    # General options
+    parser.add_argument('-c', '--ctlesc', action='store_true',
+                            help='Escape all control characters')
+
     # Action options
     actiongroup = parser.add_mutually_exclusive_group(required=True)
     actiongroup.add_argument('-s', '--send', action='store_true',
@@ -221,8 +237,6 @@ class FileWriter:
             return None
 
 class Zmodem:
-    #l_rx_raw = logging.getLogger('zmodem.rx.raw')
-    #l_tx_raw = logging.getLogger('zmodem.tx.raw')
     class HeaderDetectState(IntEnum):
         WAIT_HEADER_START   = 0
         WAIT_ZDLE           = 1
@@ -235,14 +249,15 @@ class Zmodem:
         WAIT_FINAL_O        = 3
         WAIT_FINAL_OO       = 4
 
-    def __init__(self, zf):
+    def __init__(self, zf, ctl_esc=False):
         self.zf = zf
         self.input_queue = deque()
         self.header_detect_state = self.HeaderDetectState.WAIT_HEADER_START
         self.rx_state = self.RxState.WAIT_HEADER
         self.get_subpacket_gen = None
-        self.l_rx_raw = logging.getLogger('zmodem.rx.raw')
-        self.l_tx_raw = logging.getLogger('zmodem.tx.raw')
+        self.ctl_esc = ctl_esc
+        self.l_rx_raw = logging.getLogger('rx.raw')
+        self.l_tx_raw = logging.getLogger('tx.raw')
         self.file_pos = 0
         self.cancel_count = 0
         self.exit_code = ExitCode.NORMAL
@@ -256,8 +271,6 @@ class Zmodem:
             self.zf = None
 
     def read_input(self):
-        #logging.getLogger('zmodem.rx').info('read')
-        #self.l_rx_raw.info('read')
         d = self.zf.read(128)
         if d:
             self.l_rx_raw.debug(bytes_as_hex_str(d))
@@ -307,7 +320,7 @@ class Zmodem:
                 result = g.send(byteval)
                 if result is not None:
                     header_data.append(result)
-            logging.getLogger('rx.header.hex.data').debug(bytes_as_hex_str(header_data))
+            # logging.getLogger('rx.header.hex.data').debug(bytes_as_hex_str(header_data))
 
             # Get 4 hex digits, representing 16-bit CRC value.
             g = Zmodem.get_lower_hex(1, 2)
@@ -320,7 +333,7 @@ class Zmodem:
         except ValueError:
             return False
 
-        logging.getLogger('rx.header.hex.crc').debug('{:04X}'.format(crc16_val))
+        # logging.getLogger('rx.header.hex.crc').debug('{:04X}'.format(crc16_val))
         crc16_calc_val = CRC_16(header_data)
         if crc16_val == crc16_calc_val:
             yield header_data
@@ -329,14 +342,15 @@ class Zmodem:
 
     @staticmethod
     def escape_decode(escapeval):
-        if escapeval & 0x60 == 0x40:
-            return escapeval ^ 0x40
-        elif escapeval == 0x6C:
+        if escapeval == 0x6C:
             return 0x7F
         elif escapeval == 0x6D:
             return 0xFF
+        elif escapeval & 0x60 == 0x40:
+            return escapeval ^ 0x40
         else:
             raise ValueError
+            #return escapeval ^ 0x40
 
     @staticmethod
     def get_bin_escaped(count, word_size=1):
@@ -382,7 +396,7 @@ class Zmodem:
                 result = g.send(byteval)
                 if result is not None:
                     header_data.append(result)
-            logging.getLogger('rx.header.bin.data').debug(bytes_as_hex_str(header_data))
+            # logging.getLogger('rx.header.bin.data').debug(bytes_as_hex_str(header_data))
 
             # Get 2 binary values, possibly escaped.
             g = Zmodem.get_bin_escaped(1, 2)
@@ -395,7 +409,7 @@ class Zmodem:
         except ValueError:
             return False
 
-        logging.getLogger('rx.header.bin.crc').debug('{:04X}'.format(crc16_val))
+        # logging.getLogger('rx.header.bin.crc').debug('{:04X}'.format(crc16_val))
         crc16_calc_val = CRC_16(header_data)
         if crc16_val == crc16_calc_val:
             yield header_data
@@ -409,7 +423,6 @@ class Zmodem:
         It will yield however many bytes of data after the subpacket terminator followed by
         a valid CRC has been received. It yields tuple (subpacket_type, subpacket_data)."""
         try:
-            logging.getLogger('rx.subpacket').debug('Start')
             # Get data, possibly escaped.
             g = Zmodem.get_bin_escaped(2**32)
             next(g)
@@ -424,6 +437,7 @@ class Zmodem:
             except StopIteration as e:
                 subpacket_type = e.value
             logging.getLogger('rx.subpacket.data').debug(bytes_as_hex_str(subpacket_data))
+            logging.getLogger('rx.subpacket.data').debug(bytes_as_printable_str(subpacket_data))
 
             # Get 2 binary values, possibly escaped.
             try:
@@ -479,7 +493,6 @@ class Zmodem:
         header_type_val, header_data_flags = struct.unpack(">BI", header_data)
         header_data_pos = self.swap32(header_data_flags)
         header_type = ZType(header_type_val)
-        #logging.getLogger('rx.header.type').info('{!r}'.format(header_type))
         logging.getLogger('rx.header').info('type {!r}; flags {:08X}; pos {:08X}'.format(header_type, header_data_flags, header_data_pos))
         self.process_header_type(header_type, header_data_flags, header_data_pos)
 
@@ -489,7 +502,6 @@ class Zmodem:
 
         if self.header_type in self.subpacket_handlers_pre:
             handler_fn = self.subpacket_handlers_pre[self.header_type]
-            logging.getLogger('rx.subpacket.process').debug('call {!r}'.format(handler_fn))
             handler_fn(self, subpacket_type, subpacket_data)
 
         if subpacket_type_enum == ZSubpacketType.ZCRCE:
@@ -505,7 +517,6 @@ class Zmodem:
 
         if self.header_type in self.subpacket_handlers_post:
             handler_fn = self.subpacket_handlers_post[self.header_type]
-            logging.getLogger('rx.subpacket.process').debug('call {!r}'.format(handler_fn))
             handler_fn(self, subpacket_type, subpacket_data)
 
     def detect_header(self, byteval):
@@ -523,11 +534,19 @@ class Zmodem:
                 return byteval
         return None
 
+    def should_detect_header(self):
+        # If not escaping all control characters, then detect a header at all times.
+        # If escaping all control characters, only detect header when expecting one.
+        # (When escaping all control characters, *-ZDLE-A can appear in data subpackets.)
+        return (not self.ctl_esc) or (self.rx_state == self.RxState.WAIT_HEADER)
+
     def process_input(self):
         """Process input in self.input_queue."""
         # logging.getLogger('rx.q').debug(bytes_as_hex_str(self.input_queue))
         while self.input_queue:
             byteval = self.input_queue.popleft()
+
+            # Check for 5× CAN (ZDLE) which is cancel/abort.
             if byteval == CAN:
                 self.cancel_count += 1
                 if self.cancel_count >= 5:
@@ -536,7 +555,7 @@ class Zmodem:
                 self.cancel_count = 0
 
             result = self.detect_header(byteval)
-            if result is not None:
+            if self.should_detect_header() and result is not None:
                 if byteval == ZHEX:
                     self.rx_state = self.RxState.GET_HEADER
                     self.get_header_gen = self.get_hex_header()
@@ -554,6 +573,7 @@ class Zmodem:
                         self.rx_state = self.RxState.WAIT_HEADER
                         self.process_header(result)
                 except StopIteration:
+                    # TODO: Handle ValueError
                     self.rx_state = self.RxState.WAIT_HEADER
             elif self.rx_state == self.RxState.GET_SUBPACKET:
                 if self.get_subpacket_gen is None:
@@ -562,14 +582,11 @@ class Zmodem:
                 try:
                     result = self.get_subpacket_gen.send(byteval)
                     if result is not None:
-                        logging.getLogger('rx.subpacket').debug('Got result')
                         self.rx_state = self.RxState.WAIT_HEADER
                         self.get_subpacket_gen = None
                         subpacket_type, subpacket_data = result
                         self.process_subpacket(subpacket_type, subpacket_data)
-                        logging.getLogger('rx.subpacket').debug('Next state {!r}'.format(self.rx_state))
                 except StopIteration:
-                    logging.getLogger('rx.subpacket').debug('stop')
                     self.rx_state = self.RxState.WAIT_HEADER
                     self.get_subpacket_gen = None
             elif self.rx_state == self.RxState.WAIT_FINAL_O:
@@ -578,22 +595,33 @@ class Zmodem:
                 elif time.monotonic() - self.event_time >= FINAL_OO_TIMEOUT_S:
                     sys.exit(self.exit_code)
             elif self.rx_state == self.RxState.WAIT_FINAL_OO:
-                if byteval == ord(b'O') or time.monotonic() - self.event_time >= FINAL_OO_TIMEOUT_S:
+                if byteval == ord(b'O'):
+                    sys.exit(self.exit_code)
+                else:
+                    self.rx_state = self.RxState.WAIT_FINAL_O
+                if time.monotonic() - self.event_time >= FINAL_OO_TIMEOUT_S:
                     sys.exit(self.exit_code)
 
 
 class ZmodemReceive(Zmodem):
-    def __init__(self, zf, file_writer):
-        super().__init__(zf)
+    def __init__(self, zf, file_writer, ctl_esc=False):
+        super().__init__(zf, ctl_esc)
         self.file_writer = file_writer
         self.do_periodic_zrinit = True
         self.event_time = 0
+        self.attn_seq = b''
+
+    def send_zrinit(self):
+        flags = 0
+        if self.ctl_esc:
+            flags |= ZrinitFlags.ESCCTL
+        self.send_hex_header(ZType.ZRINIT, flags, RX_BUFFER_SIZE)
 
     def periodic_send_zrinit(self):
         if self.do_periodic_zrinit:
             now_time = time.monotonic()
             if now_time - self.event_time >= ZRINIT_INTERVAL_S:
-                self.send_hex_header(ZType.ZRINIT, 0, RX_BUFFER_SIZE)
+                self.send_zrinit()
                 self.event_time = now_time
 
     def process(self):
@@ -602,10 +630,13 @@ class ZmodemReceive(Zmodem):
         self.process_input()
 
     def zrqinit_handler(self, header_data_flags, header_data_pos):
-        self.send_hex_header(ZType.ZRINIT, 0, RX_BUFFER_SIZE)
+        self.send_zrinit()
 
     def zsinit_handler(self, header_data_flags, header_data_pos):
+        if header_data_flags & ZsinitFlags.ESCCTL:
+            self.ctl_esc = True
         self.rx_state = self.RxState.GET_SUBPACKET
+        self.do_periodic_zrinit = False
 
     def zfile_handler(self, header_data_flags, header_data_pos):
         self.file_pos = 0
@@ -621,12 +652,14 @@ class ZmodemReceive(Zmodem):
     def zabort_handler(self, header_data_flags, header_data_pos):
         self.send_hex_header(ZType.ZFIN, 0, 0)
         self.rx_state = self.RxState.WAIT_FINAL_O
+        self.do_periodic_zrinit = False
         self.event_time = time.monotonic()
         self.exit_code = ExitCode.SERVER_ABORT
 
     def zfin_handler(self, header_data_flags, header_data_pos):
         self.send_hex_header(ZType.ZFIN, 0, 0)
         self.rx_state = self.RxState.WAIT_FINAL_O
+        self.do_periodic_zrinit = False
         self.event_time = time.monotonic()
 
     def zdata_handler(self, header_data_flags, header_data_pos):
@@ -635,7 +668,7 @@ class ZmodemReceive(Zmodem):
 
     def zeof_handler(self, header_data_flags, header_data_pos):
         self.file_writer.close()
-        self.send_hex_header(ZType.ZRINIT, 0, RX_BUFFER_SIZE)
+        self.send_zrinit()
 
     def zferr_handler(self, header_data_flags, header_data_pos):
         # Unlikely for sender to send this. Treat it like an abort.
@@ -660,11 +693,13 @@ class ZmodemReceive(Zmodem):
         pass
 
     def zdata_subpacket_pre_handler(self, subpacket_type, subpacket_data):
+        # Pre-handler so that the ZACK will have updated file_pos.
         self.file_writer.write(subpacket_data)
         self.file_pos += len(subpacket_data)
 
     def zsinit_subpacket_post_handler(self, subpacket_type, subpacket_data):
-        pass
+        self.attn_seq = subpacket_data.rstrip(b'\0')
+        self.send_hex_header(ZType.ZACK, 0, 0)
 
     def zfile_subpacket_post_handler(self, subpacket_type, subpacket_data):
         # Alternatively, send ZSKIP or ZFERR if the filename is bad or transfer options are unsuitable.
@@ -716,18 +751,18 @@ def main():
 
         # Open serial
         with serial.Serial(args.serialport, args.bitrate, timeout=0) as s:
-
-            rz = ZmodemReceive(s, FileWriter())
-            logging.getLogger('info').info('Get data')
-            # Get input data
-            while True:
-                rz.process()
-                #time.sleep(0.005)
+            if args.receive:
+                rz = ZmodemReceive(s, FileWriter(), args.ctlesc)
+                logging.getLogger('info').info('Get data')
+                # Get input data
+                while True:
+                    rz.process()
+                    time.sleep(0.005)
+            elif args.send:
+                raise NotImplementedError('Send not implemented')
     except KeyboardInterrupt:
         logging.getLogger('zmodem').info('Stopping')
         raise
-    finally:
-        rz.close()
 
 if __name__ == '__main__':
     main()
